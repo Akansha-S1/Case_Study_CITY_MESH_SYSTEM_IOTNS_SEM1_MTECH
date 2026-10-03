@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CityMesh: edge orchestration in a water network</title>
+<style>
+:root{--red:#b30000;--dark:#5a0000;--green:#2e7d32;--ink:#1a1a1a;--muted:#5f6673;--line:#d9dde3;--pink:#fdeaea;--lora:#0f9d8f;--nb:#2563eb;--g5:#ea580c}
+*{box-sizing:border-box}
+body{margin:0;font:400 16px/1.45 "Segoe UI",system-ui,-apple-system,Arial,sans-serif;color:var(--ink);background:#f5f6f8}
+header{background:linear-gradient(90deg,#5a0000,#c00000);color:#fff;padding:16px 24px}
+header h1{margin:0;font-size:1.4rem}
+header p{margin:4px 0 0;opacity:.92;font-size:.95rem}
+main{max-width:1240px;margin:0 auto;padding:18px 18px 40px;display:grid;gap:16px}
+.panel{background:#fff;border:1px solid var(--line);border-radius:8px;padding:14px 16px}
+.controls{display:flex;flex-wrap:wrap;gap:10px 22px;align-items:center}
+button{font:inherit;font-weight:600;border:1px solid var(--red);background:var(--red);color:#fff;border-radius:6px;padding:9px 16px;cursor:pointer}
+button.ghost{background:#fff;color:var(--red)}
+button:hover{filter:brightness(1.08)}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #f59e0b;outline-offset:2px}
+label{display:inline-flex;gap:8px;align-items:center;font-weight:500;cursor:pointer}
+input[type=checkbox]{width:18px;height:18px;accent-color:var(--red)}
+select{font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:6px}
+.scene{padding:0;overflow:hidden}
+.scene svg{display:block;width:100%;height:auto}
+.scene text{font-family:"Segoe UI",system-ui,Arial,sans-serif}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}
+.kpi b{display:block;font-size:1.7rem;line-height:1.15;font-variant-numeric:tabular-nums}
+.kpi span{color:var(--muted);font-size:.88rem}
+#status{font-weight:700;color:var(--dark);font-size:1.1rem;min-height:1.6em}
+.two{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(340px,1fr))}
+h2{margin:0 0 8px;font-size:1.05rem;color:var(--dark)}
+#log{margin:0;padding:0;list-style:none;font-size:.92rem;max-height:230px;overflow:auto}
+#log li{padding:5px 0;border-bottom:1px solid #eef0f3;display:flex;gap:10px}
+#log time{flex:none;width:64px;font-weight:700;color:var(--red);font-variant-numeric:tabular-nums}
+table{border-collapse:collapse;width:100%;font-size:.9rem}
+th{background:var(--red);color:#fff;text-align:center;padding:8px;border:1px solid var(--red)}
+td{padding:8px;border:1px solid var(--red);text-align:center;font-variant-numeric:tabular-nums}
+td:first-child{text-align:left}
+tr.best td{font-weight:700;color:var(--green)}
+.note{color:var(--muted);font-size:.86rem;margin-top:8px}
+</style>
+</head>
+<body>
+<header><h1>CityMesh: edge orchestration in a water network</h1><p>Burst the pipe and watch the sensor, the links, the AI and the valve respond. Switch the edge orchestrator off to see the difference.</p></header>
+<main>
+  <div class="panel controls">
+    <button id="burst" type="button">Burst the pipe</button>
+    <button id="reset" type="button" class="ghost">Reset</button>
+    <label><input type="checkbox" id="orch" checked> Edge orchestrator on</label>
+    <label><input type="checkbox" id="down" checked> LoRaWAN gateway is down</label>
+    <label>Speed <select id="speed"><option value="1">1×</option><option value="2">2×</option><option value="0.5">0.5×</option></select></label>
+  </div>
+  <div class="panel scene" id="scene"></div>
+  <div class="panel"><div id="status">Water flowing normally. Press "Burst the pipe".</div></div>
+  <div class="kpis">
+    <div class="panel kpi"><b id="k_time">00:00</b><span>time since the burst</span></div>
+    <div class="panel kpi"><b id="k_lost">0 L</b><span>water lost</span></div>
+    <div class="panel kpi"><b id="k_link">LoRaWAN</b><span>link the sensor is using</span></div>
+    <div class="panel kpi"><b id="k_valve">Open</b><span>valve</span></div>
+  </div>
+  <div class="two">
+    <div class="panel"><h2>Event log</h2><ul id="log"></ul></div>
+    <div class="panel"><h2>Simulation model: 5,000 pipe bursts</h2>
+      <button id="mc" type="button">Run 5,000 bursts</button>
+      <div id="mcout" style="margin-top:12px"></div>
+      <p class="note">Link delivery ratios come from the CityMesh model. Step times, the 20 L/s leak and the 10-minute mean outage are assumptions.</p></div>
+  </div>
+</main>
+<script>
+// ---------------- simulation model (same as the Python version) ----------------
+const P={p_lora:0.960,p_nbiot:0.990,p_5g:0.989,p_lora_valve:0.992,outage:0.05,outage_mean_s:600,
+ t_detect:1,t_lora:2,t_nbiot:4,t_retry:5,t_switch:1,t_ai:3,t_5g:0.05,t_valve:2,leak_lps:20,
+ report_interval_s:1800,crew_mean_s:46*60,crew_sd_s:8*60};
+const NAME={lora:'LoRaWAN',nbiot:'NB-IoT','5g':'5G'},COL={lora:'#0f9d8f',nbiot:'#2563eb','5g':'#ea580c'};
+function gauss(){let u=0,v=0;while(!u)u=Math.random();while(!v)v=Math.random();return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v)}
+function simulateBurst(mode,gatewayDown,outageS){
+  const ev=[];let t=0;
+  if(mode==='old'){t=Math.random()*P.report_interval_s;while(Math.random()>P.p_lora)t+=P.report_interval_s;
+    t+=Math.max(1200,P.crew_mean_s+P.crew_sd_s*gauss());return{t,ev}}
+  const down=gatewayDown==null?Math.random()<P.outage:gatewayDown;
+  const restore=down?(outageS==null?-Math.log(1-Math.random())*P.outage_mean_s:outageS):0;
+  t+=P.t_detect;ev.push({t,kind:'detect'});
+  let link='lora';
+  for(;;){let ok,dur;
+    if(link==='lora'){ok=t>=restore&&Math.random()<P.p_lora;dur=P.t_lora}else{ok=Math.random()<P.p_nbiot;dur=P.t_nbiot}
+    ev.push({t,kind:'alert',link,ok,dur});t+=dur;if(ok)break;
+    if(mode==='orchestrated'){link=link==='lora'?'nbiot':'lora';ev.push({t,kind:'switch',link});t+=P.t_switch}else t+=P.t_retry}
+  ev.push({t,kind:'ai',dur:P.t_ai});t+=P.t_ai;
+  link='5g';
+  for(;;){const ok=Math.random()<(link==='5g'?P.p_5g:P.p_lora_valve),dur=link==='5g'?P.t_5g:P.t_lora;
+    ev.push({t,kind:'command',link,ok,dur});t+=dur;if(ok)break;
+    if(mode==='orchestrated'){link=link==='5g'?'lora':'5g';t+=P.t_switch}else t+=2}
+  ev.push({t,kind:'closing',dur:P.t_valve});t+=P.t_valve;ev.push({t,kind:'closed'});
+  return{t,ev,restore}}
+function fmtTime(s){return s<120?Math.round(s)+' s':Math.round(s/60)+' min'}
+function monteCarlo(n){const out=[];
+  [['old','Without the solution (one network, manual valve)'],['single','CityMesh without edge orchestration'],['orchestrated','CityMesh with edge orchestration']].forEach(([mode,name])=>{
+    const a=[];for(let i=0;i<n;i++)a.push(simulateBurst(mode).t);a.sort((x,y)=>x-y);
+    const mean=a.reduce((s,x)=>s+x,0)/n;
+    out.push({name,median:fmtTime(a[Math.floor(n/2)]),p95:fmtTime(a[Math.floor(n*0.99)]),lost:Math.round(mean*P.leak_lps).toLocaleString('en-US'),within:(a.filter(x=>x<=60).length/n*100).toFixed(1)+'%'})});
+  return out}
+
+// ---------------- scene ----------------
+let win='';for(let r=0;r<4;r++)for(let c=0;c<3;c++)win+=`<rect x="${640+c*24}" y="${104+r*34}" width="13" height="20" fill="${(r+c)%3?'#334155':'#fde68a'}" stroke="#334155"/>`;
+let drops='';for(let i=0;i<40;i++)drops+='<circle r="4" fill="#38bdf8" opacity="0"/>';
+document.getElementById('scene').innerHTML=`<svg viewBox="0 0 1000 390" role="img" aria-label="Street cross-section with a water main, a valve, a pressure sensor, a gateway, a mobile tower and a control centre">
+<rect width="1000" height="250" fill="#1e2a4a"/><circle cx="940" cy="40" r="18" fill="#f8fafc"/>
+<rect y="250" width="1000" height="140" fill="#a98467"/><rect y="250" width="1000" height="9" fill="#6b7280"/>
+<line x1="20" y1="330" x2="780" y2="330" stroke="#475569" stroke-width="26"/>
+<line id="wUp" x1="20" y1="330" x2="200" y2="330" stroke="#7dd3fc" stroke-width="12" stroke-dasharray="16 10"/>
+<line id="wDn" x1="200" y1="330" x2="780" y2="330" stroke="#7dd3fc" stroke-width="12" stroke-dasharray="16 10"/>
+<rect x="20" y="195" width="70" height="55" fill="#e2e8f0" stroke="#334155" stroke-width="2"/><text x="55" y="186" fill="#fff" font-size="13" font-weight="700" text-anchor="middle">Pump</text>
+<line x1="200" y1="330" x2="200" y2="240" stroke="#334155" stroke-width="4"/><rect id="vbox" x="188" y="222" width="24" height="18" rx="3" fill="${COL['5g']}" stroke="#1f2937"/>
+<polygon id="valve" points="180,310 220,350 220,310 180,350" fill="${COL['5g']}" stroke="#1f2937" stroke-width="2"/><text id="vtxt" x="200" y="378" fill="#fff" font-size="13" font-weight="700" text-anchor="middle">5G valve: open</text>
+<rect x="280" y="190" width="80" height="60" fill="#fde68a" stroke="#334155" stroke-width="2"/><polygon points="270,190 320,150 370,190" fill="#b45309" stroke="#334155" stroke-width="2"/>
+<rect x="290" y="261" width="60" height="36" fill="#d6c2ad" stroke="#334155" stroke-width="2"/><circle id="meter" cx="320" cy="279" r="9" fill="${COL.nbiot}" stroke="#fff" stroke-width="2"/><text x="320" y="312" fill="#fff" font-size="12" font-weight="700" text-anchor="middle">Basement meter</text>
+<line x1="460" y1="330" x2="460" y2="232" stroke="#334155" stroke-width="3"/><rect id="sens" x="450" y="316" width="20" height="28" rx="3" fill="${COL.lora}" stroke="#1f2937" stroke-width="2"/><circle id="stop" cx="460" cy="230" r="8" fill="${COL.lora}"/>
+<text x="460" y="378" fill="#fff" font-size="13" font-weight="700" text-anchor="middle">Pressure sensor</text>
+<rect id="ebox" x="385" y="165" width="150" height="46" rx="8" fill="#0f172a" stroke="#2e7d32" stroke-width="2.5"/><text id="e1" x="460" y="184" fill="#fff" font-size="12.5" font-weight="700" text-anchor="middle">Edge orchestrator</text><text id="e2" x="460" y="202" fill="#fff" font-size="12.5" font-weight="700" text-anchor="middle">link in use: LoRaWAN</text>
+<g id="crack" opacity="0"><path d="M560 318 l10 10 l-8 8 l12 8" stroke="#111827" stroke-width="3" fill="none"/></g><ellipse id="puddle" cx="570" cy="252" rx="0" ry="6" fill="#38bdf8"/><g id="spray">${drops}</g>
+<rect x="630" y="90" width="80" height="160" fill="#cbd5e1" stroke="#334155" stroke-width="2"/>${win}
+<line x1="670" y1="90" x2="670" y2="55" stroke="#cbd5e1" stroke-width="3"/><circle id="gw" cx="670" cy="55" r="8" fill="${COL.lora}"/><text id="gwt" x="712" y="34" fill="#fff" font-size="13" font-weight="700" text-anchor="end">LoRaWAN gateway</text>
+<text id="fail" x="670" y="82" fill="#ef4444" font-size="30" font-weight="700" text-anchor="middle"></text>
+<path d="M786 250 L800 65 L814 250 M792 170 H808" stroke="#cbd5e1" stroke-width="3" fill="none"/><rect x="792" y="60" width="16" height="9" fill="${COL.nbiot}"/><rect x="792" y="72" width="16" height="9" fill="${COL['5g']}"/><text x="800" y="34" fill="#fff" font-size="13" font-weight="700" text-anchor="middle">NB-IoT + 5G tower</text>
+<rect x="860" y="150" width="120" height="100" fill="#e2e8f0" stroke="#334155" stroke-width="2"/><rect x="870" y="165" width="100" height="42" rx="4" fill="#0f172a"/><text id="screen" x="920" y="191" fill="#4ade80" font-size="12" font-weight="700" text-anchor="middle">ALL NORMAL</text><text x="920" y="138" fill="#fff" font-size="13" font-weight="700" text-anchor="middle">Control centre + AI</text>
+<path id="lnk" d="" fill="none" stroke-width="3" stroke-dasharray="9 7"/><circle id="dot" r="9" stroke="#fff" stroke-width="2" opacity="0"/>
+</svg>`;
+const $=id=>document.getElementById(id);
+const PATH={'alert-lora':[[460,230],[670,55],[870,186]],'alert-nbiot':[[460,230],[800,65],[870,186]],'command-5g':[[870,186],[800,65],[200,231]],'command-lora':[[870,186],[670,55],[200,231]]};
+function along(pts,f){const L=[];let tot=0;for(let i=0;i<pts.length-1;i++){const l=Math.hypot(pts[i+1][0]-pts[i][0],pts[i+1][1]-pts[i][1]);L.push(l);tot+=l}
+  let d=Math.max(0,Math.min(1,f))*tot,k=0;while(k<L.length-1&&d>L[k]){d-=L[k];k++}const u=d/L[k];return[pts[k][0]+(pts[k+1][0]-pts[k][0])*u,pts[k][1]+(pts[k+1][1]-pts[k][1])*u]}
+
+// ---------------- playback ----------------
+let run=null,s=-1,wall=0,last=performance.now(),logged=0,ff=false;
+function mmss(x){x=Math.max(0,x);return String(Math.floor(x/60)).padStart(2,'0')+':'+String(Math.floor(x%60)).padStart(2,'0')}
+function addLog(t,text){const li=document.createElement('li');li.innerHTML='<time>'+mmss(t)+'</time><span>'+text+'</span>';$('log').prepend(li)}
+function buildLog(run){const L=[{t:0,text:'Pipe bursts under the road. Water sprays onto the street.'}];
+  for(const e of run.ev){
+    if(e.kind==='detect')L.push({t:e.t,text:'Pressure sensor detects the drop.'});
+    else if(e.kind==='alert'){L.push({t:e.t,text:'Sensor sends the alert over '+NAME[e.link]+'.',retry:!e.ok});
+      L.push({t:e.t+e.dur,text:e.ok?'Alert delivered to the control centre over '+NAME[e.link]+'.':'No acknowledgement on '+NAME[e.link]+(run.orch?'.':'. Will retry the same link.'),retry:!e.ok})}
+    else if(e.kind==='switch')L.push({t:e.t,text:'Edge orchestrator switches the sensor to '+NAME[e.link]+'.'});
+    else if(e.kind==='ai')L.push({t:e.t+e.dur,text:'AI compares nearby flow readings: leak confirmed.'});
+    else if(e.kind==='command')L.push({t:e.t+e.dur,text:e.ok?'Close-valve command delivered over '+NAME[e.link]+'.':'Close-valve command not delivered over '+NAME[e.link]+'.'});
+    else if(e.kind==='closed')L.push({t:e.t,text:'Valve closed. Water stopped after '+fmtTime(run.t)+'.'})}
+  return L.sort((a,b)=>a.t-b.t)}
+function start(){const orch=$('orch').checked;run=simulateBurst(orch?'orchestrated':'single',$('down').checked,600);run.orch=orch;run.log=buildLog(run);s=0;logged=0;$('log').innerHTML=''}
+function reset(){run=null;s=-1;$('log').innerHTML='';draw()}
+function draw(){
+  const T=run?run.t:Infinity,leaking=run&&s>=0&&s<T,closed=run&&s>=T,orch=run?run.orch:$('orch').checked;
+  $('wUp').setAttribute('stroke-dashoffset',-wall*60);$('wDn').setAttribute('stroke-dashoffset',-wall*60);$('wDn').setAttribute('opacity',closed?0:1);
+  $('crack').setAttribute('opacity',run?1:0);$('puddle').setAttribute('rx',run?Math.min(200,30+22*Math.sqrt(Math.min(s,T))):0);
+  const kids=$('spray').children;for(let i=0;i<40;i++){const tau=(wall+i/40)%1,x=570+((i*37)%19-9)*5.5*tau,y=250-(160+(i*53)%90)*tau+170*tau*tau;
+    kids[i].setAttribute('cx',x);kids[i].setAttribute('cy',y);kids[i].setAttribute('opacity',leaking&&y<250?1:0)}
+  $('valve').setAttribute('fill',closed?'#dc2626':COL['5g']);$('vbox').setAttribute('fill',closed?'#dc2626':COL['5g']);$('vtxt').textContent=closed?'5G valve: closed':'5G valve: open';
+  const alerted=run&&s>=P.t_detect;$('sens').setAttribute('fill',alerted?'#ef4444':COL.lora);$('stop').setAttribute('fill',alerted?'#ef4444':COL.lora);
+  const gwDown=run?s<run.restore:$('down').checked;$('gw').setAttribute('fill',gwDown?'#ef4444':COL.lora);$('gwt').textContent=gwDown?'LoRaWAN gateway: DOWN':'LoRaWAN gateway';$('gwt').setAttribute('fill',gwDown?'#fca5a5':'#fff');
+  $('meter').setAttribute('fill',closed?'#f59e0b':COL.nbiot);
+  let status=run?'PIPE BURSTS: water sprays onto the road':'Water flowing normally. Press "Burst the pipe".',screen='ALL NORMAL',active='lora',dot=null,fail='';
+  if(run)for(const e of run.ev){if(e.t>s)break;
+    if(e.kind==='detect')status='Sensor detects the pressure drop';
+    else if(e.kind==='alert'||e.kind==='command'){const shown=Math.max(e.dur,1.2),f=(s-e.t)/shown,what=e.kind==='alert'?'Alert':'Close-valve command';
+      if(f<1){const p=PATH[e.kind+'-'+e.link];dot=[e.ok?p:p.slice(0,2),f,COL[e.link]];status=what+' sent over '+NAME[e.link]+'…'}
+      else if(e.ok){status=what+' delivered over '+NAME[e.link];screen=e.kind==='alert'?'LEAK ALERT':'CLOSING VALVE'}
+      else{status='No reply: the gateway is down'+(orch?'':'. Retrying LoRaWAN…');fail=s-e.t<shown+2.5?'✕':''}
+      if(e.kind==='alert')active=e.link}
+    else if(e.kind==='switch'){status='EDGE ORCHESTRATOR: no reply, switching to '+NAME[e.link];active=e.link}
+    else if(e.kind==='ai'){status='AI checks nearby flow readings: leak confirmed';screen='LEAK CONFIRMED'}
+    else if(e.kind==='closing'){status='Valve closing';screen='CLOSING VALVE'}
+    else if(e.kind==='closed'){status='Valve closed. Water stopped after '+fmtTime(T)+'.';screen='VALVE CLOSED'}}
+  $('status').textContent=status+(ff?'   (fast forward ▶▶)':'');$('screen').textContent=screen;$('screen').setAttribute('fill',screen==='ALL NORMAL'?'#4ade80':'#fbbf24');$('fail').textContent=fail;
+  $('e1').textContent=orch?'Edge orchestrator':'Single radio';$('e2').textContent='link in use: '+NAME[active];$('ebox').setAttribute('stroke',orch?'#2e7d32':'#b30000');
+  if(dot){const xy=along(dot[0],dot[1]);$('dot').setAttribute('cx',xy[0]);$('dot').setAttribute('cy',xy[1]);$('dot').setAttribute('fill',dot[2]);$('dot').setAttribute('opacity',1);
+    $('lnk').setAttribute('d','M'+dot[0].map(p=>p.join(' ')).join(' L'));$('lnk').setAttribute('stroke',dot[2])}
+  else{$('dot').setAttribute('opacity',0);$('lnk').setAttribute('d','')}
+  $('k_time').textContent=run?mmss(Math.min(s,T)):'00:00';$('k_lost').textContent=run?Math.round(P.leak_lps*Math.max(0,Math.min(s,T))).toLocaleString('en-US')+' L':'0 L';
+  $('k_link').textContent=NAME[active];$('k_valve').textContent=closed?'Closed':'Open';$('k_valve').style.color=closed?'#b30000':'';
+}
+function tick(now){requestAnimationFrame(tick);const dt=Math.min(0.1,(now-last)/1000);last=now;wall+=dt;
+  if(run&&s<run.t+3){const next=run.ev.find(e=>e.t>s&&!(e.kind==='alert'&&!e.ok));        // next event that is not another failed retry
+    const was=ff;ff=!!next&&next.t-s>10&&s>15;                                             // long wait ahead: fast forward
+    if(ff&&!was)addLog(s,'Still retrying LoRaWAN while the gateway is down… (fast forward)');
+    s+=dt*parseFloat($('speed').value)*(ff?Math.max(8,(next.t-s)/1.5):1);
+    while(logged<run.log.length&&run.log[logged].t<=s){const e=run.log[logged];if(!(ff&&e.retry))addLog(e.t,e.text);logged++}}
+  else ff=false;
+  draw()}
+$('burst').addEventListener('click',start);$('reset').addEventListener('click',reset);
+$('orch').addEventListener('change',()=>{if(!run)draw()});$('down').addEventListener('change',()=>{if(!run)draw()});
+$('mc').addEventListener('click',()=>{const r=monteCarlo(5000);
+  $('mcout').innerHTML='<table><tr><th>Scenario</th><th>Median time to stop the water</th><th>Worst 1% take over</th><th>Mean water lost (L)</th><th>Stopped within 1 min</th></tr>'+
+   r.map((x,i)=>`<tr class="${i===2?'best':''}"><td>${x.name}</td><td>${x.median}</td><td>${x.p95}</td><td>${x.lost}</td><td>${x.within}</td></tr>`).join('')+'</table>'});
+draw();requestAnimationFrame(tick);
+</script>
+</body>
+</html>
